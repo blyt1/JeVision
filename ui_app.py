@@ -1,4 +1,7 @@
-"""Local UI: drop in a tile image, get the Qwen3-VL zero-shot defect score.
+"""Local UI: drop in an image, optionally ask a yes/no question, get the Qwen3-VL zero-shot readout.
+
+Leave the question empty for the defect check (flagged above a threshold tuned on test tiles);
+type a question ("Is this a cow?") to get Yes/No with the raw Yes-No margin.
 
     .venv/bin/python ui_app.py   ->  http://127.0.0.1:7860
 """
@@ -43,35 +46,41 @@ app = FastAPI()
 
 class Req(BaseModel):
     image: str  # base64 (no data: prefix)
-    question: str = "v1"
+    question: str = ""  # empty = defect check (QUESTIONS["v1"])
 
 
 @app.post("/score")
 def score(req: Req):
-    img = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((TILE, TILE))
-    conv = [[{"role": "user", "content": [
-        {"type": "image", "image": img}, {"type": "text", "text": QUESTIONS[req.question]}]}]]
+    img = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB")
+    k = TILE / max(img.size)  # longer side -> TILE, aspect kept (square tiles unchanged)
+    img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))))
+    custom = req.question.strip()
+    text = f"{custom} Answer Yes or No." if custom else QUESTIONS["v1"]
+    conv = [[{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": text}]}]]
     inputs = processor.apply_chat_template(
         conv, add_generation_prompt=True, tokenize=True, return_dict=True,
         return_tensors="pt", padding=True).to(model.device)
     with torch.inference_mode():
         last = model(**inputs).logits[:, -1, :].float()
     margin = (torch.logsumexp(last[:, yes_ids], 1) - torch.logsumexp(last[:, no_ids], 1)).item()
+    thr = 0.0 if custom else THRESHOLD
     return {"margin": margin, "score": torch.sigmoid(torch.tensor(margin)).item(),
-            "threshold": THRESHOLD, "flagged": margin > THRESHOLD}
+            "threshold": thr, "flagged": margin > thr, "custom": bool(custom)}
 
 
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Tile Defect Check</title>
+<title>Image Check</title>
 <style>
 :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--bd:#ccc;--ok:#1a7f37;--bad:#c62828}
 @media(prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#999;--bd:#444;--ok:#4cc26a;--bad:#ef6b6b}}
 body{background:var(--bg);color:var(--fg);font:16px system-ui;max-width:560px;margin:2rem auto;padding:0 16px}
+#q{width:100%;box-sizing:border-box;padding:.6rem;margin-bottom:1rem;font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px}
 #drop{border:2px dashed var(--bd);border-radius:12px;padding:2rem;text-align:center;color:var(--mut);cursor:pointer}
 #drop.over{border-color:var(--fg)} img{max-width:100%;border-radius:8px;margin-top:1rem}
 #res{margin-top:1rem;font-size:1.3rem;font-weight:600} small{display:block;color:var(--mut);font-weight:400;font-size:.85rem;margin-top:.3rem}
 </style>
-<h1>Tile defect check</h1>
+<h1>Image check</h1>
+<input id=q placeholder="Ask a yes/no question, e.g. Is this a cow? (empty = defect check)">
 <div id=drop>Drop a tile image here, or click to choose</div>
 <input id=f type=file accept="image/*" hidden>
 <img id=pv hidden><div id=res></div>
@@ -88,11 +97,13 @@ async function go(file){
   $('res').textContent='Scoring…';
   const b64=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result.split(',')[1]);fr.readAsDataURL(file)});
   try{
-    const r=await fetch('/score',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:b64})});
+    const r=await fetch('/score',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:b64,question:$('q').value})});
     if(!r.ok)throw new Error(await r.text());
     const d=await r.json();
-    $('res').innerHTML=`<span style="color:var(--${d.flagged?'bad':'ok'})">${d.flagged?'Possible defect':'Looks OK'}</span>`+
-      `<small>Yes−No margin ${d.margin.toFixed(2)} (flag above ${d.threshold.toFixed(2)}, about 5% false alarms on test tiles). Zero-shot Qwen3-VL-4B; a ranking score, not a probability.</small>`;
+    const word=d.custom?(d.flagged?'Yes':'No'):(d.flagged?'Possible defect':'Looks OK');
+    const col=d.custom?'fg':(d.flagged?'bad':'ok');
+    const note=d.custom?`Yes−No margin ${d.margin.toFixed(2)} (Yes above 0).`:`Yes−No margin ${d.margin.toFixed(2)} (flag above ${d.threshold.toFixed(2)}, about 5% false alarms on test tiles).`;
+    $('res').innerHTML=`<span style="color:var(--${col})">${word}</span><small>${note} Zero-shot Qwen3-VL-4B; a ranking score, not a calibrated probability.</small>`;
   }catch(e){$('res').textContent='Error: '+e.message}
 }
 </script>"""
