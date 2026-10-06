@@ -1,0 +1,13 @@
+# For tile_readout_baseline.py, patchcore_baseline.py and ui_app.py.
+# Versions are the ones tested (Python 3.13, macOS/MPS). On an NVIDIA GPU machine,
+# install the CUDA build of torch/torchvision first (see pytorch.org/get-started).
+torch>=2.14
+torchvision>=0.29
+transformers>=5.18
+accelerate>=1.15
+pillow>=12
+numpy>=2.5
+scikit-learn>=1.9
+fastapi>=0.142
+uvicorn>=0.54
+pydantic>=2.13
